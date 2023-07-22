@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.1)
-project(pedrodb)
+project(pedrokv)
 
 add_subdirectory(deps/pedrodb)
 add_subdirectory(deps/pedronet)
