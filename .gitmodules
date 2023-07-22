@@ -1,3 +1,6 @@
-[submodule "pedrodb/3rd/hat-trie"]
-	path = pedrodb/3rd/hat-trie
-	url = git@github.com:Tessil/hat-trie.git
+[submodule "pedronet"]
+	path = deps/pedronet
+	url = git@github.com:zhihaop/pedronet.git
+[submodule "pedrodb"]
+	path = deps/pedrodb
+	url = git@github.com:zhihaop/pedrodb.git
