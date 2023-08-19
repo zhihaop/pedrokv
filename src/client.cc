@@ -123,12 +123,8 @@ void Client::handleResponse(const Response<>& response) {
 
 void Client::handleClose() {
   std::unique_lock lock{mu_};
-  Response response;
-  response.type = ResponseType::kError;
-  response.data = "client closed";
-
-  for (auto& [_, ptr] : table_) {
-    (*ptr)(response);
+  for (auto& [id, ptr] : table_) {
+    (*ptr)(ReturnError(id, "client closed"));
   }
   table_.clear();
   not_full_.notify_all();
