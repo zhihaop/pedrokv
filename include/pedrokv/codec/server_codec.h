@@ -20,7 +20,7 @@ class ServerChannelCodec : public ChannelHandlerAdaptor {
 
   template <class T>
   void Send(const Response<T>& response) {
-    response.Pack(&output_);
+    response.Pack(GetContext().GetOutputBuffer());
   }
 
   void OnRead(Timestamp now, ArrayBuffer& buffer) override {
@@ -36,15 +36,12 @@ class ServerChannelCodec : public ChannelHandlerAdaptor {
       buffer.EnsureWritable(content_length);
       break;
     }
-    
-    if (output_.ReadableBytes()) {
-      auto conn = GetConnection();
-      conn->Send(&output_);
+
+    auto conn = GetConnection();
+    if (conn != nullptr) {
+      conn->Send(GetContext().GetOutputBuffer());
     }
   }
-
- private:
-  ArrayBuffer output_;
 };
 }  // namespace pedrokv
 
