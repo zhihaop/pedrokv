@@ -447,11 +447,11 @@ PedroKV 客户端的编解码器 `ClientChannelCodec` 与服务端的类似，�
 void Client::requestSend(Request<> request, uint32_t id, ResponseCallback callback) {
   std::unique_lock lock{mu_};
 
-  while (responses_.size() > options_.max_inflight) {
+  while (table_.size() > options_.max_inflight) {
     not_full_.wait(lock);
   }
 
-  if (responses_.count(id)) {
+  if (table_.count(id)) {
     Response response;
     response.id = id;
     response.type = ResponseType::kError;
@@ -459,15 +459,15 @@ void Client::requestSend(Request<> request, uint32_t id, ResponseCallback callba
     return;
   }
   
-  responses_[id] = std::move(callback);
+  table_[id] = std::move(callback);
 
   if (!client_.Write(std::move(request))) {
     Response response;
     response.id = id;
     response.type = ResponseType::kError;
     
-    responses_[id](response);
-    responses_.erase(id);
+    table_[id](response);
+    table_.erase(id);
   }
 }
 ```
@@ -486,7 +486,7 @@ void Client::handleResponse(std::queue<Response<>>& responses) {
     auto response = std::move(responses.front());
     responses.pop();
     auto it = Client::handleResponse.find(response.id);
-    if (it == responses_.end()) {
+    if (it == table_.end()) {
       return;
     }
 
@@ -494,7 +494,7 @@ void Client::handleResponse(std::queue<Response<>>& responses) {
     if (callback) {
       callback(std::move(response));
     }
-    responses_.erase(it);
+    table_.erase(it);
   }
   not_full_.notify_all();
 }
@@ -503,7 +503,7 @@ void Client::handleResponse(std::queue<Response<>>& responses) {
 #### 展望
 
 目前缺少一个超时和重试的机制。考虑到 `inflight` 的请求数量不大于 `max_infight`，可以通过 `EventLoop::ScheduleEvery`
-的方式定期扫描回调表 `Client::responses_`。通过对比时间戳，发现超时的回调，即时返回超时失败信息。
+的方式定期扫描回调表 `Client::table_`。通过对比时间戳，发现超时的回调，即时返回超时失败信息。
 
 ## 实验
 

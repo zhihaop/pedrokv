@@ -7,7 +7,7 @@ namespace pedrokv {
 class ClientChannelHandler final : public ClientChannelCodec {
  public:
   void OnRequest(Timestamp now, Response<> response) final {
-    client_->handleResponse(std::move(response));
+    client_->handleResponse(response);
   }
   void OnConnect(Timestamp now) final { client_->handleConnect(); }
   void OnClose(Timestamp now) final { client_->handleClose(); }
@@ -18,31 +18,52 @@ class ClientChannelHandler final : public ClientChannelCodec {
   Client* client_;
 };
 
+Response<> ReturnError(uint32_t id, std::string msg) {
+  Response response;
+  response.id = id;
+  response.type = ResponseType::kError;
+  response.data = std::move(msg);
+  return response;
+}
+
 void Client::requestSend(Request<> request, uint32_t id,
                          ResponseCallback callback) {
-  std::unique_lock lock{mu_};
 
-  while (responses_.size() > options_.max_inflight) {
-    not_full_.wait(lock);
-  }
-
-  if (responses_.count(id)) {
-    Response response;
-    response.id = id;
-    response.type = ResponseType::kError;
-    callback(response);
+  auto ptr = std::make_shared<ResponseCallback>(std::move(callback));
+  auto conn = client_.GetConnection();
+  if (conn == nullptr) {
+    (*ptr)(ReturnError(id, "client close"));
     return;
   }
 
-  responses_[id] = std::move(callback);
-  if (!client_.Write(std::move(request))) {
-    Response response;
-    response.id = id;
-    response.type = ResponseType::kError;
+  {
+    std::unique_lock lock{mu_};
+    while (table_.size() > options_.max_inflight) {
+      not_full_.wait(lock);
+    }
 
-    responses_[id](response);
-    responses_.erase(id);
+    if (table_.count(id)) {
+      (*ptr)(ReturnError(id, "internal error"));
+      return;
+    }
+    table_[id] = ptr;
   }
+
+  conn->GetEventLoop().Schedule([this, id, ptr, request = std::move(request)] {
+    auto conn = client_.GetConnection();
+    if (conn == nullptr) {
+      (*ptr)(ReturnError(id, "client close"));
+
+      std::unique_lock lock{mu_};
+      table_.erase(id);
+      return;
+    }
+
+    auto ctx = conn->GetChannelContext();
+    auto buffer = ctx->GetOutputBuffer();
+    request.Pack(buffer);
+    conn->Send(buffer);
+  });
 }
 
 void Client::Start() {
@@ -85,21 +106,19 @@ void Client::Delete(std::string_view key, ResponseCallback callback) {
   return requestSend(std::move(request), id, std::move(callback));
 }
 
-void Client::handleResponse(Response<> response) {
+void Client::handleResponse(const Response<>& response) {
   std::unique_lock lock{mu_};
 
-  auto it = responses_.find(response.id);
-  if (it == responses_.end()) {
+  auto it = table_.find(response.id);
+  if (it == table_.end()) {
     return;
   }
-
-  auto callback = std::move(it->second);
-  if (callback) {
-    callback(std::move(response));
-  }
-  responses_.erase(it);
-
+  auto ptr = std::move(it->second);
+  table_.erase(it);
   not_full_.notify_all();
+  lock.unlock();
+
+  (*ptr)(response);
 }
 
 void Client::handleClose() {
@@ -108,12 +127,10 @@ void Client::handleClose() {
   response.type = ResponseType::kError;
   response.data = "client closed";
 
-  for (auto& [_, callback] : responses_) {
-    if (callback) {
-      callback(response);
-    }
+  for (auto& [_, ptr] : table_) {
+    (*ptr)(response);
   }
-  responses_.clear();
+  table_.clear();
   not_full_.notify_all();
   close_latch_->CountDown();
 }

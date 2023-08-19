@@ -24,13 +24,13 @@ class Client : nonmovable, noncopyable {
 
   std::mutex mu_;
   std::condition_variable not_full_;
-  std::unordered_map<uint32_t, ResponseCallback> responses_;
+  std::unordered_map<uint32_t, std::shared_ptr<ResponseCallback>> table_;
   std::atomic_uint32_t request_id_{};
 
   std::shared_ptr<Latch> open_latch_;
   std::shared_ptr<Latch> close_latch_;
 
-  void handleResponse(Response<> responses);
+  void handleResponse(const Response<>& responses);
   void handleClose();
   void handleConnect();
   void requestSend(Request<> request, uint32_t id, ResponseCallback callback);
