@@ -11,107 +11,40 @@
 
 namespace pedrokv {
 
-class ServerCodecContext;
-using ResponseSender = std::function<void(Response<>&)>;
-using ServerMessageCallback = std::function<void(
-    const TcpConnectionPtr&, const ResponseSender&, const RequestView&)>;
-
-class ServerCodecContext : public ChannelContext,
-                           std::enable_shared_from_this<ServerCodecContext> {
-  ArrayBuffer buffer_;
-  std::mutex mu_;
-  ArrayBuffer output_;
-  ServerMessageCallback callback_;
-
+class ServerChannelCodec : public ChannelHandlerAdaptor {
  public:
-  explicit ServerCodecContext(ServerMessageCallback callback)
-      : callback_(std::move(callback)) {}
+  explicit ServerChannelCodec(ChannelContext::Ptr ctx)
+      : ChannelHandlerAdaptor(std::move(ctx)) {}
 
-  void HandleMessage(const TcpConnectionPtr& conn, ArrayBuffer* buffer) {
-    ResponseSender sender([&](Response<>& response) {
-      std::unique_lock lock{mu_};
-      response.Pack(&output_);
-    });
-    
+  virtual void OnRequest(Timestamp now, RequestView request) = 0;
+
+  template <class T>
+  void Send(const Response<T>& response) {
+    response.Pack(&output_);
+  }
+
+  void OnRead(Timestamp now, ArrayBuffer& buffer) override {
     while (true) {
       RequestView req;
-      if (buffer_.ReadableBytes()) {
-        if (req.UnPack(&buffer_)) {
-          callback_(conn, sender, req);
-          continue;
-        }
-
-        uint16_t len;
-        if (!PeekInt(&buffer_, &len)) {
-          buffer_.Append(buffer);
-          continue;
-        }
-
-        len = std::min(len - buffer_.ReadableBytes(), buffer->ReadableBytes());
-        buffer_.Append(buffer->ReadIndex(), len);
-        buffer->Retrieve(len);
+      if (req.UnPack(&buffer)) {
+        OnRequest(now, req);
         continue;
       }
 
-      if (req.UnPack(buffer)) {
-        callback_(conn, sender, req);
-        continue;
-      }
-
+      uint16_t content_length;
+      PeekInt(&buffer, &content_length);
+      buffer.EnsureWritable(content_length);
       break;
     }
-
-    std::unique_lock lock{mu_};
+    
     if (output_.ReadableBytes()) {
+      auto conn = GetConnection();
       conn->Send(&output_);
     }
   }
-};
 
-class ServerCodec {
-  pedronet::ConnectionCallback connect_callback_;
-  pedronet::CloseCallback close_callback_;
-  ServerMessageCallback message_callback_;
-
- public:
-  void OnConnect(pedronet::ConnectionCallback callback) {
-    connect_callback_ = std::move(callback);
-  }
-
-  void OnClose(pedronet::CloseCallback callback) {
-    close_callback_ = std::move(callback);
-  }
-
-  void OnMessage(ServerMessageCallback callback) {
-    message_callback_ = std::move(callback);
-  }
-
-  pedronet::ConnectionCallback GetOnConnect() {
-    return [this](const pedronet::TcpConnectionPtr& conn) {
-      auto ctx = std::make_shared<ServerCodecContext>(message_callback_);
-      conn->SetContext(ctx);
-
-      if (connect_callback_) {
-        connect_callback_(conn);
-      }
-    };
-  }
-
-  pedronet::CloseCallback GetOnClose() {
-    return [this](const pedronet::TcpConnectionPtr& conn) {
-      if (close_callback_) {
-        close_callback_(conn);
-      }
-    };
-  }
-
-  pedronet::MessageCallback GetOnMessage() {
-    return [](const pedronet::TcpConnectionPtr& conn, ArrayBuffer& buffer,
-              Timestamp now) {
-      auto ctx = conn->GetContext().get();
-      ((ServerCodecContext*)ctx)->HandleMessage(conn, &buffer);
-    };
-  }
+ private:
+  ArrayBuffer output_;
 };
 }  // namespace pedrokv
 

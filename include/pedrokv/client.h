@@ -15,25 +15,26 @@ namespace pedrokv {
 
 using ResponseCallback = std::function<void(Response<>)>;
 
+class ClientChannelHandler;
 class Client : nonmovable, noncopyable {
+  friend class ClientChannelHandler;
+
   pedronet::TcpClient client_;
   ClientOptions options_;
-  ClientCodec codec_;
-
-  pedronet::ErrorCallback error_callback_;
-  pedronet::ConnectionCallback connect_callback_;
-  pedronet::CloseCallback close_callback_;
 
   std::mutex mu_;
   std::condition_variable not_full_;
   std::unordered_map<uint32_t, ResponseCallback> responses_;
   std::atomic_uint32_t request_id_{};
 
-  std::shared_ptr<pedrolib::Latch> close_latch_;
+  std::shared_ptr<Latch> open_latch_;
+  std::shared_ptr<Latch> close_latch_;
 
-  void HandleResponse(std::queue<Response<>>& responses);
-  void SendRequest(Request<> request, uint32_t id, ResponseCallback callback);
-  
+  void handleResponse(Response<> responses);
+  void handleClose();
+  void handleConnect();
+  void requestSend(Request<> request, uint32_t id, ResponseCallback callback);
+
  public:
   using Ptr = std::shared_ptr<Client>;
 
@@ -51,24 +52,12 @@ class Client : nonmovable, noncopyable {
     }
   }
 
-  void OnConnect(pedronet::ConnectionCallback callback) {
-    connect_callback_ = std::move(callback);
-  }
-
   void Get(std::string_view key, ResponseCallback callback);
 
   void Put(std::string_view key, std::string_view value,
            ResponseCallback callback);
 
   void Delete(std::string_view key, ResponseCallback callback);
-
-  void OnClose(pedronet::CloseCallback callback) {
-    close_callback_ = std::move(callback);
-  }
-
-  void OnError(pedronet::ErrorCallback callback) {
-    error_callback_ = std::move(callback);
-  }
 
   void Start();
 };
@@ -84,7 +73,7 @@ class SyncClient {
 
  public:
   using Ptr = std::shared_ptr<SyncClient>;
-  
+
   SyncClient(InetAddress address, ClientOptions options)
       : address_(std::move(address)),
         options_(std::move(options)),

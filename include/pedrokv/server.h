@@ -14,19 +14,20 @@
 
 namespace pedrokv {
 
+class ServerChannelHandler;
 class Server : nonmovable,
                noncopyable,
                public std::enable_shared_from_this<Server> {
+  
+  friend class ServerChannelHandler;
   pedronet::TcpServer server_;
   pedronet::InetAddress address_;
   ServerOptions options_;
 
-  std::shared_ptr<pedrodb::DB> db_;
-  ServerCodec codec_;
-
-  void HandleRequest(const TcpConnectionPtr& conn, const ResponseSender& sender,
-                     const RequestView& requests);
-
+  pedrodb::DB::Ptr db_;
+  
+  Response<> handleRequest(Timestamp now, RequestView request);
+  
  public:
   Server(pedronet::InetAddress address, ServerOptions options);
 

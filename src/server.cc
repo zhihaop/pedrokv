@@ -1,56 +1,59 @@
 #include "pedrokv/server.h"
 
 namespace pedrokv {
+
+class ServerChannelHandler final : public ServerChannelCodec {
+ public:
+  ServerChannelHandler(ChannelContext::Ptr ctx, Server* server)
+      : ServerChannelCodec(std::move(ctx)), server_(server) {}
+
+  void OnRequest(Timestamp now, RequestView request) override {
+    Response<> response = server_->handleRequest(now, request);
+    Send(std::move(response));
+  }
+
+ private:
+  Server* server_;
+};
+
 pedrokv::Server::Server(pedronet::InetAddress address,
                         pedrokv::ServerOptions options)
     : address_(std::move(address)), options_(std::move(options)) {
   server_.SetGroup(options_.boss_group, options_.worker_group);
 
-  auto stat = pedrodb::SegmentDB::Open(options_.db_options, options_.db_path,
-                                       options_.db_shards, &db_);
+  auto stat = pedrodb::DB::Open(options_.db_options, options_.db_path, &db_);
   if (stat != pedrodb::Status::kOk) {
     PEDROKV_FATAL("failed to open db {}", options_.db_path);
   }
 
-  codec_.OnMessage([this](auto&& conn, auto&& sender, auto&& requests) {
-    HandleRequest(conn, sender, requests);
+  server_.SetBuilder([this](auto ctx) {
+    return std::make_shared<ServerChannelHandler>(std::move(ctx), this);
   });
-
-  codec_.OnConnect([](const pedronet::TcpConnectionPtr& conn) {
-    PEDROKV_INFO("connect to client {}", *conn);
-  });
-
-  codec_.OnClose([](const pedronet::TcpConnectionPtr& conn) {
-    PEDROKV_INFO("disconnect to client {}", *conn);
-  });
-
-  server_.OnError([](const pedronet::TcpConnectionPtr& conn, Error err) {
-    PEDROKV_ERROR("client {} error: {}", *conn, err);
-  });
-
-  server_.OnConnect(codec_.GetOnConnect());
-  server_.OnClose(codec_.GetOnClose());
-  server_.OnMessage(codec_.GetOnMessage());
 }
 
-void Server::HandleRequest(const TcpConnectionPtr&,
-                           const ResponseSender& sender,
-                           const RequestView& request) {
-
+Response<> Server::handleRequest(Timestamp /* now */, RequestView request) {
   Response response;
   response.id = request.id;
+  response.type = ResponseType::kError;
+
+  auto db = db_;
+  if (db == nullptr) {
+    response.data = "server closed";
+    return response;
+  }
+
   pedrodb::Status status = pedrodb::Status::kOk;
   switch (request.type) {
     case RequestType::kGet: {
-      status = db_->Get({}, request.key, &response.data);
+      status = db->Get({}, request.key, &response.data);
       break;
     }
     case RequestType::kDelete: {
-      status = db_->Delete({}, request.key);
+      status = db->Delete({}, request.key);
       break;
     }
     case RequestType::kPut: {
-      status = db_->Put({}, request.key, request.value);
+      status = db->Put({}, request.key, request.value);
       break;
     }
     default: {
@@ -66,6 +69,7 @@ void Server::HandleRequest(const TcpConnectionPtr&,
     response.type = ResponseType::kOk;
   }
 
-  sender(response);
+  return response;
 }
+
 }  // namespace pedrokv

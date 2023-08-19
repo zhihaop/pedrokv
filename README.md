@@ -238,7 +238,7 @@ class Server : nonmovable,
   ServerOptions options_;
 
   std::shared_ptr<pedrodb::DB> db_;
-  ServerCodec codec_;
+  ServerChannelCodec codec_;
 
   void HandleRequest(const TcpConnectionPtr& conn, const ResponseSender& sender,
                      const RequestView& requests);
@@ -300,7 +300,7 @@ Server::Server(pedronet::InetAddress address,
 可以降低过程中的不必要拷贝。
 
 ```cpp
-void ServerCodec::HandleMessage(const TcpConnectionPtr& conn, ArrayBuffer* buffer) {
+void ServerChannelCodec::HandleMessage(const TcpConnectionPtr& conn, ArrayBuffer* buffer) {
     ResponseSender sender([&](Response<>& response) {
         std::unique_lock lock{mu_};
         response.Pack(&output_);
@@ -389,7 +389,7 @@ void Server::HandleRequest(const TcpConnectionPtr&,
 PedroKV 借助 `pedronet::TcpClient` 实现了一个异步 PedroKV 客户端。
 它的主要方法有 `Get`，`Put`，`Delete`。当调用这三个接口时，对应的 `ResponseCallback` 会被调用有且只有一次。如果 `Get`
 成功，那么就返回成功的 `Response`，否则返回失败的 `Response`。通过 `Response::type` 字段，我们可以轻松判断这个请求成功与否。
-它最重要的内部方法是 `SendRequest` 和 `HandleResponse`，分别对应的请求的发送和处理。
+它最重要的内部方法是 `requestSend` 和 `handleResponse`，分别对应的请求的发送和处理。
 
 ```cpp
 using ResponseCallback = std::function<void(Response<>)>;
@@ -397,8 +397,8 @@ using ResponseCallback = std::function<void(Response<>)>;
 class Client : nonmovable, noncopyable {
 
   ...
-  void HandleResponse(std::queue<Response<>>& responses);
-  void SendRequest(Request<> request, uint32_t id, ResponseCallback callback);
+  void handleResponse(std::queue<Response<>>& responses);
+  void requestSend(Request<> request, uint32_t id, ResponseCallback callback);
 public:
 
   ...
@@ -417,10 +417,10 @@ public:
 #### 初始化
 
 PedroKV 客户端的初始化与服务端类似，也是设置各种回调，并于编解码器绑定在一起。当消息来临时，会以 `Buffer`
-的形式传递到编解码器 `ClientCodec`，当编解码器处理完成后，将调用 `HandleResponse`出来所有相关的请求。
+的形式传递到编解码器 `ClientChannelCodec`，当编解码器处理完成后，将调用 `handleResponse`出来所有相关的请求。
 
 ```cpp
-codec_.OnMessage([this](auto& conn, auto& responses) { HandleResponse(responses); });
+codec_.OnMessage([this](auto& conn, auto& responses) { handleResponse(responses); });
 
 client_.OnError(error_callback_);
 client_.OnMessage(codec_.GetOnMessage());
@@ -431,12 +431,12 @@ client_.Start();
 
 #### 编解码器
 
-PedroKV 客户端的编解码器 `ClientCodec` 与服务端的类似，这里不再阐述。不过，`ClientCodec`
-会将多个响应打包在一起，通过客户端的 `HandleResponse` 方法进行处理，以降低锁的开销。
+PedroKV 客户端的编解码器 `ClientChannelCodec` 与服务端的类似，这里不再阐述。不过，`ClientChannelCodec`
+会将多个响应打包在一起，通过客户端的 `handleResponse` 方法进行处理，以降低锁的开销。
 
 #### 发送请求
 
-`Get`，`Put`，`Delete`方法最终会调用 `SendRequest` 方法发送请求。该方法的步骤如下：
+`Get`，`Put`，`Delete`方法最终会调用 `requestSend` 方法发送请求。该方法的步骤如下：
 
 - L4：如果当前 `in_flight` 请求数量大于 `max_inflight`，需要进行等待。
 - L8：如果当前的请求 `id` 已经被占用了，返回错误。
@@ -444,7 +444,7 @@ PedroKV 客户端的编解码器 `ClientCodec` 与服务端的类似，这里不
 - L18：通过 `pedronet::TcpClient` 发送请求，如果发送失败直接返回
 
 ```cpp
-void Client::SendRequest(Request<> request, uint32_t id, ResponseCallback callback) {
+void Client::requestSend(Request<> request, uint32_t id, ResponseCallback callback) {
   std::unique_lock lock{mu_};
 
   while (responses_.size() > options_.max_inflight) {
@@ -474,18 +474,18 @@ void Client::SendRequest(Request<> request, uint32_t id, ResponseCallback callba
 
 #### 接收响应
 
-当服务器发来响应时，`Client::HandleResponse`接口会处理响应的响应。`responses` 代表所有未处理的响应队列。
+当服务器发来响应时，`Client::handleResponse`接口会处理响应的响应。`responses` 代表所有未处理的响应队列。
 客户端将通过回调表 `Client::response_`，使用请求 `id` 来找到相应的回调函数，进行相应的处理。
-最后通过 `not_full_.notify_all` 方法告知 `Client::SendRequest` 线程，目前已经可以接受新请求了，可以不用继续等待。
+最后通过 `not_full_.notify_all` 方法告知 `Client::requestSend` 线程，目前已经可以接受新请求了，可以不用继续等待。
 
 ```cpp
-void Client::HandleResponse(std::queue<Response<>>& responses) {
+void Client::handleResponse(std::queue<Response<>>& responses) {
   std::unique_lock lock{mu_};
 
   while (!responses.empty()) {
     auto response = std::move(responses.front());
     responses.pop();
-    auto it = Client::HandleResponse.find(response.id);
+    auto it = Client::handleResponse.find(response.id);
     if (it == responses_.end()) {
       return;
     }

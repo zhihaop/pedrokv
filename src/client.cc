@@ -1,8 +1,24 @@
+#include <utility>
+
 #include "pedrokv/client.h"
 
 namespace pedrokv {
 
-void Client::SendRequest(Request<> request, uint32_t id,
+class ClientChannelHandler final : public ClientChannelCodec {
+ public:
+  void OnRequest(Timestamp now, Response<> response) final {
+    client_->handleResponse(std::move(response));
+  }
+  void OnConnect(Timestamp now) final { client_->handleConnect(); }
+  void OnClose(Timestamp now) final { client_->handleClose(); }
+  ClientChannelHandler(ChannelContext::Ptr ctx, Client* client)
+      : ClientChannelCodec(std::move(ctx)), client_(client) {}
+
+ private:
+  Client* client_;
+};
+
+void Client::requestSend(Request<> request, uint32_t id,
                          ResponseCallback callback) {
   std::unique_lock lock{mu_};
 
@@ -17,59 +33,27 @@ void Client::SendRequest(Request<> request, uint32_t id,
     callback(response);
     return;
   }
-  
-  responses_[id] = std::move(callback);
 
+  responses_[id] = std::move(callback);
   if (!client_.Write(std::move(request))) {
     Response response;
     response.id = id;
     response.type = ResponseType::kError;
-    
+
     responses_[id](response);
     responses_.erase(id);
   }
 }
 
 void Client::Start() {
-  auto latch = std::make_shared<pedrolib::Latch>(1);
-  codec_.OnConnect([=, &latch](auto&& conn) {
-    if (connect_callback_) {
-      connect_callback_(conn);
-    }
-    close_latch_ = std::make_shared<pedrolib::Latch>(1);
-    latch->CountDown();
+  open_latch_ = std::make_shared<Latch>(1);
+  close_latch_ = std::make_shared<Latch>(1);
+  client_.SetBuilder([=](auto ctx) {
+    return std::make_shared<ClientChannelHandler>(std::move(ctx), this);
   });
 
-  codec_.OnClose([=](auto&& conn) {
-    {
-      std::unique_lock lock{mu_};
-      Response response;
-      response.type = ResponseType::kError;
-      for (auto& [_, callback] : responses_) {
-        if (callback) {
-          callback(response);
-        }
-      }
-      responses_.clear();
-      not_full_.notify_all();
-    }
-
-    if (close_callback_) {
-      close_callback_(conn);
-    }
-    close_latch_->CountDown();
-  });
-
-  codec_.OnMessage(
-      [this](auto& conn, auto& responses) { HandleResponse(responses); });
-
-  client_.OnError(error_callback_);
-  client_.OnMessage(codec_.GetOnMessage());
-  client_.OnClose(codec_.GetOnClose());
-  client_.OnConnect(codec_.GetOnConnect());
   client_.Start();
-
-  latch->Await();
+  open_latch_->Await();
 }
 
 void Client::Get(std::string_view key, ResponseCallback callback) {
@@ -78,7 +62,7 @@ void Client::Get(std::string_view key, ResponseCallback callback) {
   request.type = RequestType::kGet;
   request.id = id;
   request.key = key;
-  return SendRequest(std::move(request), id, std::move(callback));
+  return requestSend(std::move(request), id, std::move(callback));
 }
 
 void Client::Put(std::string_view key, std::string_view value,
@@ -89,7 +73,7 @@ void Client::Put(std::string_view key, std::string_view value,
   request.id = id;
   request.key = key;
   request.value = value;
-  return SendRequest(std::move(request), id, std::move(callback));
+  return requestSend(std::move(request), id, std::move(callback));
 }
 
 void Client::Delete(std::string_view key, ResponseCallback callback) {
@@ -98,26 +82,44 @@ void Client::Delete(std::string_view key, ResponseCallback callback) {
   request.type = RequestType::kDelete;
   request.id = id;
   request.key = key;
-  return SendRequest(std::move(request), id, std::move(callback));
+  return requestSend(std::move(request), id, std::move(callback));
 }
 
-void Client::HandleResponse(std::queue<Response<>>& responses) {
+void Client::handleResponse(Response<> response) {
   std::unique_lock lock{mu_};
 
-  while (!responses.empty()) {
-    auto response = std::move(responses.front());
-    responses.pop();
-    auto it = responses_.find(response.id);
-    if (it == responses_.end()) {
-      return;
-    }
-
-    auto callback = std::move(it->second);
-    if (callback) {
-      callback(std::move(response));
-    }
-    responses_.erase(it);
+  auto it = responses_.find(response.id);
+  if (it == responses_.end()) {
+    return;
   }
+
+  auto callback = std::move(it->second);
+  if (callback) {
+    callback(std::move(response));
+  }
+  responses_.erase(it);
+
   not_full_.notify_all();
 }
+
+void Client::handleClose() {
+  std::unique_lock lock{mu_};
+  Response response;
+  response.type = ResponseType::kError;
+  response.data = "client closed";
+
+  for (auto& [_, callback] : responses_) {
+    if (callback) {
+      callback(response);
+    }
+  }
+  responses_.clear();
+  not_full_.notify_all();
+  close_latch_->CountDown();
+}
+
+void Client::handleConnect() {
+  open_latch_->CountDown();
+}
+
 }  // namespace pedrokv

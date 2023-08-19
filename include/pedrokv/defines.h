@@ -26,10 +26,13 @@ using pedrolib::AppendInt;
 using pedrolib::PeekInt;
 using pedrolib::RetrieveInt;
 
+using pedrolib::Latch;
+using pedronet::ChannelBuilder;
 using pedronet::ChannelContext;
+using pedronet::ChannelHandlerAdaptor;
 using pedronet::EventLoopGroup;
 using pedronet::InetAddress;
 using pedronet::TcpConnection;
-using pedronet::TcpConnectionPtr;
+
 }  // namespace pedrokv
 #endif  // PEDROKV_DEFINES_H
